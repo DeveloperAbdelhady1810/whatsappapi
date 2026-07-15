@@ -76,6 +76,10 @@ async function startSock() {
         auth: authState,
         version,
         logger: pino({ level: 'warn' }),
+        // Required as of Baileys 7.x for reliable message retries/quoted-message
+        // resolution. This app doesn't keep a message store, so there's nothing
+        // to return, but the callback must exist.
+        getMessage: async () => undefined,
     });
 
     sock.ev.on('creds.update', saveCreds);
