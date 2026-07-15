@@ -257,6 +257,120 @@ app.get('/sendMedia', requireApiKey, async (req, res) => {
     }
 });
 
+// --- Send location message ---------------------------------------------------------
+app.get('/sendLocation', requireApiKey, async (req, res) => {
+    const phone = req.query.phone;
+    const lat = parseFloat(req.query.lat);
+    const lng = parseFloat(req.query.lng);
+    const name = req.query.name;
+    const address = req.query.address;
+
+    if (!phone || Number.isNaN(lat) || Number.isNaN(lng)) {
+        return res.status(400).send('phone, lat and lng are required');
+    }
+    if (state !== 'ready') {
+        return res.status(503).send('WhatsApp client is not ready yet');
+    }
+
+    const jid = buildJid(phone);
+    try {
+        const response = await sock.sendMessage(jid, {
+            location: { degreesLatitude: lat, degreesLongitude: lng, name, address },
+        });
+        logMessage({ phone, type: 'location', status: 'success', messageId: response.key.id });
+        res.status(202).send('Sent');
+    } catch (err) {
+        logMessage({ phone, type: 'location', status: 'failed', error: err.message || String(err) });
+        res.status(404).send({ error: 'Failed to send message' });
+    }
+});
+
+// --- Send contact (vCard) message ---------------------------------------------------------
+app.get('/sendContact', requireApiKey, async (req, res) => {
+    const phone = req.query.phone;
+    const contactName = req.query.contactName;
+    const contactPhone = req.query.contactPhone;
+
+    if (!phone || !contactName || !contactPhone) {
+        return res.status(400).send('phone, contactName and contactPhone are required');
+    }
+    if (state !== 'ready') {
+        return res.status(503).send('WhatsApp client is not ready yet');
+    }
+
+    const jid = buildJid(phone);
+    const waid = contactPhone.replace(/[^0-9]/g, '');
+    const vcard = `BEGIN:VCARD\nVERSION:3.0\nFN:${contactName}\nTEL;type=CELL;type=VOICE;waid=${waid}:+${waid}\nEND:VCARD`;
+
+    try {
+        const response = await sock.sendMessage(jid, {
+            contacts: { displayName: contactName, contacts: [{ vcard }] },
+        });
+        logMessage({ phone, type: 'contact', status: 'success', messageId: response.key.id });
+        res.status(202).send('Sent');
+    } catch (err) {
+        logMessage({ phone, type: 'contact', status: 'failed', error: err.message || String(err) });
+        res.status(404).send({ error: 'Failed to send message' });
+    }
+});
+
+// --- Send poll message ---------------------------------------------------------
+app.get('/sendPoll', requireApiKey, async (req, res) => {
+    const phone = req.query.phone;
+    const question = req.query.question;
+    const options = req.query.options; // comma-separated
+    const multiple = req.query.multiple === 'true';
+
+    if (!phone || !question || !options) {
+        return res.status(400).send('phone, question and options (comma-separated) are required');
+    }
+    const values = options.split(',').map((o) => o.trim()).filter(Boolean);
+    if (values.length < 2) {
+        return res.status(400).send('at least 2 options are required');
+    }
+    if (state !== 'ready') {
+        return res.status(503).send('WhatsApp client is not ready yet');
+    }
+
+    const jid = buildJid(phone);
+    try {
+        const response = await sock.sendMessage(jid, {
+            poll: { name: question, values, selectableCount: multiple ? values.length : 1 },
+        });
+        logMessage({ phone, type: 'poll', status: 'success', messageId: response.key.id });
+        res.status(202).send('Sent');
+    } catch (err) {
+        logMessage({ phone, type: 'poll', status: 'failed', error: err.message || String(err) });
+        res.status(404).send({ error: 'Failed to send message' });
+    }
+});
+
+// --- Send sticker message ---------------------------------------------------------
+app.get('/sendSticker', requireApiKey, async (req, res) => {
+    const phone = req.query.phone;
+    const media = req.query.media;
+
+    if (!phone || !media) {
+        return res.status(400).send('phone and media are required');
+    }
+    if (state !== 'ready') {
+        return res.status(503).send('WhatsApp client is not ready yet');
+    }
+
+    const jid = buildJid(phone);
+    try {
+        const isUrl = /^https?:\/\//i.test(media);
+        const mediaContent = isUrl ? { url: media } : fs.readFileSync(media);
+
+        const response = await sock.sendMessage(jid, { sticker: mediaContent });
+        logMessage({ phone, type: 'sticker', status: 'success', messageId: response.key.id });
+        res.status(202).send('Sent');
+    } catch (err) {
+        logMessage({ phone, type: 'sticker', status: 'failed', error: err.message || String(err) });
+        res.status(404).send({ error: 'Failed to send message' });
+    }
+});
+
 app.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
 });
