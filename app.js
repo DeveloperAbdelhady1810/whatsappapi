@@ -1,8 +1,16 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const QRCode = require('qrcode');
+const mime = require('mime-types');
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    fetchLatestBaileysVersion,
+    DisconnectReason,
+} = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom');
+const pino = require('pino');
 
 // ---------------------------------------------------------------------------
 // Config (env vars, with defaults that preserve original local behavior)
@@ -10,8 +18,6 @@ const QRCode = require('qrcode');
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY || '';
 const COUNTRY_CODE = process.env.COUNTRY_CODE !== undefined ? process.env.COUNTRY_CODE : '2';
-const HEADLESS = process.env.HEADLESS !== 'false'; // default true
-const CHROME_PATH = process.env.CHROME_PATH || undefined;
 const SESSION_PATH = process.env.SESSION_PATH || './.wwebjs_auth';
 
 if (!API_KEY) {
@@ -43,87 +49,62 @@ function logMessage(entry) {
 }
 
 // ---------------------------------------------------------------------------
-// WhatsApp client
+// WhatsApp client (Baileys — pure Node.js WebSocket implementation, no browser)
 // ---------------------------------------------------------------------------
-let state = 'initializing'; // initializing | qr | authenticated | ready | disconnected
+let state = 'initializing'; // initializing | qr | ready | disconnected
 let latestQr = null;
 let meInfo = null;
-let client = null;
+let sock = null;
 const startedAt = Date.now();
 
-// NOTE: --single-process / --no-zygote are deliberately omitted — that combo is
-// known to cause Chromium to crash immediately with no stderr output inside
-// restricted/namespaced containers (exactly the "Code: null" failure this app
-// hit on Hostinger).
-const baseArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'];
+async function startSock() {
+    const { state: authState, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
+    // WhatsApp rejects connections using a stale protocol version (405 Method Not
+    // Allowed), so always fetch the current one instead of relying on the
+    // library's baked-in default.
+    const { version } = await fetchLatestBaileysVersion();
 
-// Resolve which Chromium binary to launch:
-// 1. CHROME_PATH env var, if set (points at a system-installed Chrome).
-// 2. @sparticuz/chromium's bundled portable binary on Linux — avoids relying on
-//    Puppeteer's own postinstall Chrome download, which several hosts (incl.
-//    Hostinger shared/cloud) skip or block during `npm install`.
-// 3. Otherwise fall back to Puppeteer's own bundled Chrome (local dev).
-async function resolvePuppeteerOptions() {
-    if (CHROME_PATH) {
-        return { args: baseArgs, headless: HEADLESS, executablePath: CHROME_PATH };
-    }
-    if (process.platform === 'linux') {
-        // @sparticuz/chromium extracts its binary into os.tmpdir(). Many shared
-        // hosts (incl. this one) mount /tmp as noexec, which makes the extracted
-        // binary un-spawnable (EACCES). Redirect extraction into a writable AND
-        // executable directory inside the app itself by overriding TMPDIR, which
-        // os.tmpdir() honors.
-        const chromiumTmpDir = path.join(__dirname, '.chromium-tmp');
-        if (!fs.existsSync(chromiumTmpDir)) fs.mkdirSync(chromiumTmpDir, { recursive: true });
-        process.env.TMPDIR = chromiumTmpDir;
+    sock = makeWASocket({
+        auth: authState,
+        version,
+        logger: pino({ level: 'warn' }),
+    });
 
-        const { default: chromium } = await import('@sparticuz/chromium');
-        const executablePath = await chromium.executablePath();
-        return { args: [...chromium.args, ...baseArgs], headless: HEADLESS, executablePath };
-    }
-    return { args: baseArgs, headless: HEADLESS };
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+            state = 'qr';
+            latestQr = qr;
+            console.log('QR RECEIVED - visit /qr to scan');
+        }
+
+        if (connection === 'open') {
+            state = 'ready';
+            latestQr = null;
+            meInfo = sock.user && sock.user.id ? sock.user.id.split(':')[0].split('@')[0] : null;
+            console.log('Client is ready!');
+        }
+
+        if (connection === 'close') {
+            state = 'disconnected';
+            const statusCode = lastDisconnect && lastDisconnect.error
+                ? new Boom(lastDisconnect.error).output.statusCode
+                : undefined;
+            console.error('Connection closed. Status code:', statusCode, '| Error:', lastDisconnect && lastDisconnect.error);
+
+            if (statusCode !== DisconnectReason.loggedOut) {
+                startSock().catch((err) => console.error('FATAL: reconnect failed:', err && err.stack ? err.stack : err));
+            } else {
+                console.error('Logged out. Delete the session folder and restart to re-scan the QR code.');
+            }
+        }
+    });
 }
 
-async function startWhatsAppClient() {
-    const puppeteerOptions = await resolvePuppeteerOptions();
-
-    client = new Client({
-        authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
-        puppeteer: puppeteerOptions,
-    });
-
-    client.on('qr', (qr) => {
-        state = 'qr';
-        latestQr = qr;
-        console.log('QR RECEIVED - visit /qr to scan');
-    });
-
-    client.on('authenticated', () => {
-        state = 'authenticated';
-        latestQr = null;
-    });
-
-    client.on('ready', () => {
-        state = 'ready';
-        meInfo = client.info ? client.info.wid && client.info.wid.user : null;
-        console.log('Client is ready!');
-    });
-
-    client.on('auth_failure', (msg) => {
-        state = 'disconnected';
-        console.error('Authentication failure:', msg);
-    });
-
-    client.on('disconnected', (reason) => {
-        state = 'disconnected';
-        meInfo = null;
-        console.error('Client disconnected:', reason);
-    });
-
-    await client.initialize();
-}
-
-startWhatsAppClient().catch((err) => {
+startSock().catch((err) => {
     state = 'disconnected';
     console.error('FATAL: client initialization failed:', err && err.stack ? err.stack : err);
 });
@@ -152,7 +133,7 @@ function requireApiKey(req, res, next) {
 }
 
 function buildJid(phone) {
-    return `${COUNTRY_CODE}${phone}@c.us`;
+    return `${COUNTRY_CODE}${phone}@s.whatsapp.net`;
 }
 
 // --- Remote QR scanning page -------------------------------------------------
@@ -216,8 +197,8 @@ app.get('/send', requireApiKey, async (req, res) => {
 
     const jid = buildJid(phone);
     try {
-        const response = await client.sendMessage(jid, message);
-        logMessage({ phone, type: 'text', status: 'success', messageId: response.id ? response.id._serialized : undefined });
+        const response = await sock.sendMessage(jid, { text: message });
+        logMessage({ phone, type: 'text', status: 'success', messageId: response.key.id });
         res.status(202).send('Sent');
     } catch (err) {
         logMessage({ phone, type: 'text', status: 'failed', error: err.message || String(err) });
@@ -240,12 +221,23 @@ app.get('/sendMedia', requireApiKey, async (req, res) => {
 
     const jid = buildJid(phone);
     try {
-        const mediaInMessage = /^https?:\/\//i.test(media)
-            ? await MessageMedia.fromUrl(media)
-            : MessageMedia.fromFilePath(media);
+        const isUrl = /^https?:\/\//i.test(media);
+        const mediaContent = isUrl ? { url: media } : fs.readFileSync(media);
+        const mimeType = mime.lookup(media) || 'application/octet-stream';
 
-        const response = await client.sendMessage(jid, mediaInMessage, { caption: message });
-        logMessage({ phone, type: 'media', status: 'success', messageId: response.id ? response.id._serialized : undefined });
+        let messagePayload;
+        if (mimeType.startsWith('image/')) {
+            messagePayload = { image: mediaContent, caption: message, mimetype: mimeType };
+        } else if (mimeType.startsWith('video/')) {
+            messagePayload = { video: mediaContent, caption: message, mimetype: mimeType };
+        } else if (mimeType.startsWith('audio/')) {
+            messagePayload = { audio: mediaContent, mimetype: mimeType };
+        } else {
+            messagePayload = { document: mediaContent, mimetype: mimeType, fileName: path.basename(media), caption: message };
+        }
+
+        const response = await sock.sendMessage(jid, messagePayload);
+        logMessage({ phone, type: 'media', status: 'success', messageId: response.key.id });
         res.status(202).send('Sent');
     } catch (err) {
         logMessage({ phone, type: 'media', status: 'failed', error: err.message || String(err) });
