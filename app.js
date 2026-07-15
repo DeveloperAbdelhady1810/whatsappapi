@@ -3,12 +3,6 @@ const fs = require('fs');
 const path = require('path');
 const QRCode = require('qrcode');
 const mime = require('mime-types');
-const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    fetchLatestBaileysVersion,
-    DisconnectReason,
-} = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 
@@ -57,7 +51,21 @@ let meInfo = null;
 let sock = null;
 const startedAt = Date.now();
 
+let DisconnectReason;
+
 async function startSock() {
+    // @whiskeysockets/baileys is a pure ESM package (no CommonJS build), so it
+    // must be loaded via dynamic import() rather than require() — require()
+    // only transparently handles ESM on newer Node versions (22+), and fails
+    // with ERR_REQUIRE_ESM on older ones (e.g. Node 20, as seen on Hostinger).
+    const {
+        default: makeWASocket,
+        useMultiFileAuthState,
+        fetchLatestBaileysVersion,
+        DisconnectReason: DR,
+    } = await import('@whiskeysockets/baileys');
+    DisconnectReason = DR;
+
     const { state: authState, saveCreds } = await useMultiFileAuthState(SESSION_PATH);
     // WhatsApp rejects connections using a stale protocol version (405 Method Not
     // Allowed), so always fetch the current one instead of relying on the
