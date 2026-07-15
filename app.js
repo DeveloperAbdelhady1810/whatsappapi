@@ -64,7 +64,7 @@ async function resolvePuppeteerOptions() {
         return { args: baseArgs, headless: HEADLESS, executablePath: CHROME_PATH };
     }
     if (process.platform === 'linux') {
-        const chromium = require('@sparticuz/chromium');
+        const { default: chromium } = await import('@sparticuz/chromium');
         const executablePath = await chromium.executablePath();
         return { args: [...chromium.args, ...baseArgs], headless: HEADLESS, executablePath };
     }
