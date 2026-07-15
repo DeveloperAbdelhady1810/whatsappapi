@@ -51,7 +51,11 @@ let meInfo = null;
 let client = null;
 const startedAt = Date.now();
 
-const baseArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process', '--no-zygote'];
+// NOTE: --single-process / --no-zygote are deliberately omitted — that combo is
+// known to cause Chromium to crash immediately with no stderr output inside
+// restricted/namespaced containers (exactly the "Code: null" failure this app
+// hit on Hostinger).
+const baseArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'];
 
 // Resolve which Chromium binary to launch:
 // 1. CHROME_PATH env var, if set (points at a system-installed Chrome).
