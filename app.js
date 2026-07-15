@@ -64,6 +64,15 @@ async function resolvePuppeteerOptions() {
         return { args: baseArgs, headless: HEADLESS, executablePath: CHROME_PATH };
     }
     if (process.platform === 'linux') {
+        // @sparticuz/chromium extracts its binary into os.tmpdir(). Many shared
+        // hosts (incl. this one) mount /tmp as noexec, which makes the extracted
+        // binary un-spawnable (EACCES). Redirect extraction into a writable AND
+        // executable directory inside the app itself by overriding TMPDIR, which
+        // os.tmpdir() honors.
+        const chromiumTmpDir = path.join(__dirname, '.chromium-tmp');
+        if (!fs.existsSync(chromiumTmpDir)) fs.mkdirSync(chromiumTmpDir, { recursive: true });
+        process.env.TMPDIR = chromiumTmpDir;
+
         const { default: chromium } = await import('@sparticuz/chromium');
         const executablePath = await chromium.executablePath();
         return { args: [...chromium.args, ...baseArgs], headless: HEADLESS, executablePath };
