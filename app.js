@@ -48,50 +48,71 @@ function logMessage(entry) {
 let state = 'initializing'; // initializing | qr | authenticated | ready | disconnected
 let latestQr = null;
 let meInfo = null;
+let client = null;
 const startedAt = Date.now();
 
-const puppeteerArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process', '--no-zygote'];
+const baseArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process', '--no-zygote'];
 
-const client = new Client({
-    authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
-    puppeteer: {
-        args: puppeteerArgs,
-        headless: HEADLESS,
-        ...(CHROME_PATH ? { executablePath: CHROME_PATH } : {}),
-    },
-});
+// Resolve which Chromium binary to launch:
+// 1. CHROME_PATH env var, if set (points at a system-installed Chrome).
+// 2. @sparticuz/chromium's bundled portable binary on Linux — avoids relying on
+//    Puppeteer's own postinstall Chrome download, which several hosts (incl.
+//    Hostinger shared/cloud) skip or block during `npm install`.
+// 3. Otherwise fall back to Puppeteer's own bundled Chrome (local dev).
+async function resolvePuppeteerOptions() {
+    if (CHROME_PATH) {
+        return { args: baseArgs, headless: HEADLESS, executablePath: CHROME_PATH };
+    }
+    if (process.platform === 'linux') {
+        const chromium = require('@sparticuz/chromium');
+        const executablePath = await chromium.executablePath();
+        return { args: [...chromium.args, ...baseArgs], headless: HEADLESS, executablePath };
+    }
+    return { args: baseArgs, headless: HEADLESS };
+}
 
-client.on('qr', (qr) => {
-    state = 'qr';
-    latestQr = qr;
-    console.log('QR RECEIVED - visit /qr to scan');
-});
+async function startWhatsAppClient() {
+    const puppeteerOptions = await resolvePuppeteerOptions();
 
-client.on('authenticated', () => {
-    state = 'authenticated';
-    latestQr = null;
-});
+    client = new Client({
+        authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
+        puppeteer: puppeteerOptions,
+    });
 
-client.on('ready', () => {
-    state = 'ready';
-    meInfo = client.info ? client.info.wid && client.info.wid.user : null;
-    console.log('Client is ready!');
-});
+    client.on('qr', (qr) => {
+        state = 'qr';
+        latestQr = qr;
+        console.log('QR RECEIVED - visit /qr to scan');
+    });
 
-client.on('auth_failure', (msg) => {
+    client.on('authenticated', () => {
+        state = 'authenticated';
+        latestQr = null;
+    });
+
+    client.on('ready', () => {
+        state = 'ready';
+        meInfo = client.info ? client.info.wid && client.info.wid.user : null;
+        console.log('Client is ready!');
+    });
+
+    client.on('auth_failure', (msg) => {
+        state = 'disconnected';
+        console.error('Authentication failure:', msg);
+    });
+
+    client.on('disconnected', (reason) => {
+        state = 'disconnected';
+        meInfo = null;
+        console.error('Client disconnected:', reason);
+    });
+
+    await client.initialize();
+}
+
+startWhatsAppClient().catch((err) => {
     state = 'disconnected';
-    console.error('Authentication failure:', msg);
-});
-
-client.on('disconnected', (reason) => {
-    state = 'disconnected';
-    meInfo = null;
-    console.error('Client disconnected:', reason);
-});
-
-client.initialize().catch((err) => {
-    state = 'disconnected';
-    console.error('FATAL: client.initialize() failed:', err && err.stack ? err.stack : err);
+    console.error('FATAL: client initialization failed:', err && err.stack ? err.stack : err);
 });
 
 process.on('unhandledRejection', (err) => {
@@ -176,6 +197,9 @@ app.get('/send', requireApiKey, async (req, res) => {
     if (!phone || !message) {
         return res.status(400).send('phone and message are required');
     }
+    if (state !== 'ready') {
+        return res.status(503).send('WhatsApp client is not ready yet');
+    }
 
     const jid = buildJid(phone);
     try {
@@ -196,6 +220,9 @@ app.get('/sendMedia', requireApiKey, async (req, res) => {
 
     if (!phone || !media) {
         return res.status(400).send('phone and media are required');
+    }
+    if (state !== 'ready') {
+        return res.status(503).send('WhatsApp client is not ready yet');
     }
 
     const jid = buildJid(phone);
