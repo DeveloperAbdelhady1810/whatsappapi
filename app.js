@@ -89,7 +89,18 @@ client.on('disconnected', (reason) => {
     console.error('Client disconnected:', reason);
 });
 
-client.initialize();
+client.initialize().catch((err) => {
+    state = 'disconnected';
+    console.error('FATAL: client.initialize() failed:', err && err.stack ? err.stack : err);
+});
+
+process.on('unhandledRejection', (err) => {
+    console.error('UNHANDLED REJECTION:', err && err.stack ? err.stack : err);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('UNCAUGHT EXCEPTION:', err && err.stack ? err.stack : err);
+});
 
 // ---------------------------------------------------------------------------
 // Express app
