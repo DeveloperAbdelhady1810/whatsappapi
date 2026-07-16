@@ -180,6 +180,24 @@ app.get('/qr', requireApiKey, async (req, res) => {
     }
 });
 
+// --- Logout / reset (WhatsApp force-logout leaves state stuck at 'disconnected'
+// with no way to get a fresh QR without deleting the session folder) ---------
+app.get('/logout', requireApiKey, async (req, res) => {
+    if (sock) {
+        await sock.logout().catch(() => {});
+        sock = null;
+    }
+    fs.rmSync(SESSION_PATH, { recursive: true, force: true });
+    state = 'initializing';
+    latestQr = null;
+    meInfo = null;
+    startSock().catch((err) => {
+        state = 'disconnected';
+        console.error('FATAL: client re-initialization failed:', err && err.stack ? err.stack : err);
+    });
+    res.json({ status: 'logged out, generating new QR' });
+});
+
 // --- Health / status ---------------------------------------------------------
 app.get('/status', requireApiKey, (req, res) => {
     res.json({
